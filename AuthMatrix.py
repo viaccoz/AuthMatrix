@@ -1128,9 +1128,6 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController, IContextMenuFa
                         return False
                 else:
                     if messageEntry._failureRegex and not foundFailureRegex:
-                        print(messageEntry._failureRegex)
-                        print(foundFailureRegex)
-                        print(resp)
                         return False
                     if messageEntry._successRegex and foundSuccessRegex:
                         return False

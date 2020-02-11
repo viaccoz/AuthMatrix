@@ -81,7 +81,7 @@ import random
 import string
 
 
-AUTHMATRIX_VERSION = "0.8.1"
+AUTHMATRIX_VERSION = "0.8.2"
 
 
 class BurpExtender(IBurpExtender, ITab, IMessageEditorController, IContextMenuFactory):
@@ -286,20 +286,10 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController, IContextMenuFa
                     selfExtender._messageTable.redrawTable()
                     selfExtender._chainTable.redrawTable()
 
-        class actionToggleRegex(ActionListener):
-            def actionPerformed(self,e):
-                if selfExtender._selectedRow >= 0:
-                    if selfExtender._selectedRow not in selfExtender._messageTable.getSelectedRows():
-                        messages = [selfExtender._db.getMessageByRow(selfExtender._selectedRow)]
-                    else:
-                        messages = [selfExtender._db.getMessageByRow(rowNum) for rowNum in selfExtender._messageTable.getSelectedRows()]
-                    for m in messages:
-                        m.setFailureRegex(not m.isFailureRegex())
-                        m.clearResults()
-                    selfExtender._selectedColumn = -1
-                    selfExtender._messageTable.redrawTable()
-
         class actionChangeRegexes(ActionListener):
+            def __init__(self, isSuccessRegex):
+                self._isSuccessRegex = isSuccessRegex
+
             def actionPerformed(self,e):
                 if selfExtender._selectedRow >= 0:
                     if selfExtender._selectedRow not in selfExtender._messageTable.getSelectedRows():
@@ -307,11 +297,13 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController, IContextMenuFa
                     else:
                         messages = [selfExtender._db.getMessageByRow(rowNum) for rowNum in selfExtender._messageTable.getSelectedRows()]
 
-                    newRegex,failureRegex = selfExtender.changeRegexPopup()
+                    newRegex = selfExtender.changeRegexPopup(self._isSuccessRegex)
                     if newRegex:
                         for message in messages:
-                            message._regex = newRegex
-                            message.setFailureRegex(failureRegex)
+                            if self._isSuccessRegex:
+                                message._successRegex = newRegex
+                            else:
+                                message._failureRegex = newRegex
                         # Add to list of regexes if its not already there
                         if newRegex not in selfExtender._db.arrayOfRegexes:
                             selfExtender._db.arrayOfRegexes.append(newRegex)
@@ -378,12 +370,12 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController, IContextMenuFa
         messageRun = JMenuItem("Run Request(s)")
         messageRun.addActionListener(actionRunMessage())
         messagePopup.add(messageRun)
-        toggleRegex = JMenuItem("Toggle Regex Mode (Success/Failure)")
-        toggleRegex.addActionListener(actionToggleRegex())
-        messagePopup.add(toggleRegex)
-        changeRegex = JMenuItem("Change Regexes")
-        changeRegex.addActionListener(actionChangeRegexes())
-        messagePopup.add(changeRegex)
+        changeSuccessRegex = JMenuItem("Change Success Regexes")
+        changeSuccessRegex.addActionListener(actionChangeRegexes(isSuccessRegex = True))
+        messagePopup.add(changeSuccessRegex)
+        changeFailureRegex = JMenuItem("Change Failure Regexes")
+        changeFailureRegex.addActionListener(actionChangeRegexes(isSuccessRegex = False))
+        messagePopup.add(changeFailureRegex)
         changeDomain = JMenuItem("Change Target Domain")
         changeDomain.addActionListener(actionChangeDomain())
         messagePopup.add(changeDomain)
@@ -568,17 +560,17 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController, IContextMenuFa
             for messageInfo in messages:
                 requestInfo = self._helpers.analyzeRequest(messageInfo)
                 name = str(requestInfo.getMethod()).ljust(8) + requestInfo.getUrl().getPath()
-                # Grab regex from response
-                regex = "^HTTP/1\\.1 200 OK"
+                # Grab success regex from response
+                successRegex = "^HTTP/1\\.1 200 OK"
                 response = messageInfo.getResponse()
                 if response:
                     responseInfo=self._helpers.analyzeResponse(response)
                     if len(responseInfo.getHeaders()):
                         responseCodeHeader = responseInfo.getHeaders()[0]
-                        regex = "^"+re.escape(responseCodeHeader)
+                        successRegex = "^"+re.escape(responseCodeHeader)
                 # Must create a new RequestResponseStored object since modifying the original messageInfo
                 # from its source (such as Repeater) changes this saved object. MessageInfo is a reference, not a copy
-                messageIndex = self._db.createNewMessage(RequestResponseStored(self,requestResponse=messageInfo), name, regex)
+                messageIndex = self._db.createNewMessage(RequestResponseStored(self,requestResponse=messageInfo), name, successRegex)
             self._messageTable.redrawTable()
             self._chainTable.redrawTable()
             self.highlightTab()
@@ -768,39 +760,28 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController, IContextMenuFa
         self._tabs.removeAll()
         t.start()
 
-    def changeRegexPopup(self):
+    def changeRegexPopup(self, isSuccessRegex):
         regexComboBox = JComboBox(self._db.arrayOfRegexes)
         regexComboBox.setEditable(True)
-        failureModeCheckbox = JCheckBox()
 
         panel = JPanel(GridBagLayout())
         gbc = GridBagConstraints()
         gbc.anchor = GridBagConstraints.WEST
         firstline = JPanel()
-        firstline.add(JLabel("Select a Regex for all selected Requests:"))
+        firstline.add(JLabel("Select a " + ("Success" if isSuccessRegex else "Failure") + " Regex for all selected Requests:"))
         secondline = JPanel()
         secondline.add(regexComboBox)
-        thirdline = JPanel()
-        thirdline.add(failureModeCheckbox)
-        thirdline.add(JLabel("Regex Detects Unauthorized Requests (Failure Mode)"))
-
 
         gbc.gridy = 0
         panel.add(firstline,gbc)
         gbc.gridy = 1
         panel.add(secondline, gbc)
-        gbc.gridy = 2
-        panel.add(thirdline, gbc)
-
 
         result = JOptionPane.showConfirmDialog(self._splitpane, panel, "Select Response Regex", JOptionPane.OK_CANCEL_OPTION)
         value = regexComboBox.getSelectedItem() 
         if result == JOptionPane.CANCEL_OPTION or not value:
             return None, None
-        return value, failureModeCheckbox.isSelected()
-
-
-
+        return value
 
     def changeDomainPopup(self, service):
         hostField = JTextField(25)
@@ -1134,16 +1115,25 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController, IContextMenuFa
                     return False
                 
                 resp = StringUtil.fromBytes(response)
-                found = re.search(messageEntry._regex, resp, re.DOTALL)
 
                 roleChecked = roleIndex in activeCheckBoxedRoles
-                shouldSucceed = not roleChecked if messageEntry.isFailureRegex() else roleChecked 
-                succeeds = found if shouldSucceed else not found
                 
+                foundSuccessRegex = re.search(messageEntry._successRegex, resp, re.DOTALL)
+                foundFailureRegex = re.search(messageEntry._failureRegex, resp, re.DOTALL)
                 
-                if not succeeds:
-                    return False
-
+                if roleChecked:
+                    if messageEntry._successRegex and not foundSuccessRegex:
+                        return False
+                    if messageEntry._failureRegex and foundFailureRegex:
+                        return False
+                else:
+                    if messageEntry._failureRegex and not foundFailureRegex:
+                        print(messageEntry._failureRegex)
+                        print(foundFailureRegex)
+                        print(resp)
+                        return False
+                    if messageEntry._successRegex and foundSuccessRegex:
+                        return False
         return True
 
 
@@ -1269,7 +1259,7 @@ class MatrixDB():
         # Holds all custom data
         # NOTE: consider moving these constants to a different class
         self.STATIC_USER_TABLE_COLUMN_COUNT = 2
-        self.STATIC_MESSAGE_TABLE_COLUMN_COUNT = 3
+        self.STATIC_MESSAGE_TABLE_COLUMN_COUNT = 4
         self.STATIC_CHAIN_TABLE_COLUMN_COUNT = 7
         self.LOAD_TIMEOUT = 10.0
         self.BURP_ORANGE = Color(0xff6633)
@@ -1371,18 +1361,18 @@ class MatrixDB():
 
     # Returns the Row of the new message
     # Unlike Users and Roles, allow duplicate messages
-    def createNewMessage(self,messagebuffer,name,regex):
+    def createNewMessage(self,messagebuffer,name,successRegex):
         self.lock.acquire()
         messageIndex = self.arrayOfMessages.size()
-        self.arrayOfMessages.add(MessageEntry(messageIndex, messageIndex - self.deletedMessageCount, messagebuffer, name, regex=regex))
+        self.arrayOfMessages.add(MessageEntry(messageIndex, messageIndex - self.deletedMessageCount, messagebuffer, name, successRegex=successRegex))
 
         # Add all existing roles as unchecked
         for roleIndex in self.getActiveRoleIndexes():
             self.arrayOfMessages[messageIndex].addRoleByIndex(roleIndex)
 
-        # Add regex to array if its new
-        if regex and regex not in self.arrayOfRegexes:
-            self.arrayOfRegexes.append(regex)
+        # Add success regex to array if its new
+        if successRegex and successRegex not in self.arrayOfRegexes:
+            self.arrayOfRegexes.append(successRegex)
 
 
         self.lock.release()
@@ -1456,11 +1446,19 @@ class MatrixDB():
                 regex = message._successRegex
                 failureRegexMode=False
             messageEntry = RequestResponseStored(extender, message._host, message._port, message._protocol, message._requestData)
+
+            if failureRegexMode:
+                successRegex = ""
+                failureRegex = regex
+            else:
+                successRegex = regex
+                failureRegex = ""
+
             self.arrayOfMessages.add(MessageEntry(
                 message._index,
                 message._tableRow,
                 messageEntry,
-                message._name, message._roles, regex, message._deleted, failureRegexMode))
+                message._name, message._roles, successRegex, failureRegex, message._deleted))
 
         for role in db.arrayOfRoles:
             self.arrayOfRoles.add(RoleEntry(
@@ -1627,16 +1625,30 @@ class MatrixDB():
                 self.arrayOfRegexes = []
     
                 # NOTE leaving out roleResults and userRuns (need to convert keys)
-                # (self, index, tableRow, requestResponse, name = "", roles = {}, regex = "", deleted = False, failureRegexMode = False, enabled = True):
+                # (self, index, tableRow, requestResponse, name = "", roles = {}, successRegex = "", failureRequest = "", deleted = False, enabled = True):
                 for messageEntry in stateDict["arrayOfMessages"]:
                     deleted = False if "deleted" not in messageEntry else messageEntry["deleted"]
                     if deleted:
                         self.deletedMessageCount += 1
         
-                    regex = "" if "regexBase64" not in messageEntry else base64.b64decode(messageEntry["regexBase64"])
-        
-                    if regex and regex not in self.arrayOfRegexes:
-                        self.arrayOfRegexes.append(regex)
+                    if version >= "0.8.2":
+                        successRegex = "" if "successRegexBase64" not in messageEntry else base64.b64decode(messageEntry["successRegexBase64"])
+                        failureRegex = "" if "failureRegexBase64" not in messageEntry else base64.b64decode(messageEntry["failureRegexBase64"])
+                    else:
+                        regex = "" if "regexBase64" not in messageEntry else base64.b64decode(messageEntry["regexBase64"])
+                        failureRegexMode = False if "failureRegexMode" not in messageEntry else messageEntry["failureRegexMode"]
+                        if failureRegexMode:
+                            successRegex = ""
+                            failureRegex = regex
+                        else:
+                            successRegex = regex
+                            failureRegex = ""
+                    
+                    if successRegex and successRegex not in self.arrayOfRegexes:
+                        self.arrayOfRegexes.append(successRegex)
+                    
+                    if failureRegex and failureRegex not in self.arrayOfRegexes:
+                        self.arrayOfRegexes.append(failureRegex)
         
                     requestResponse = None if deleted else RequestResponseStored(
                             extender,
@@ -1651,9 +1663,9 @@ class MatrixDB():
                         requestResponse,
                         messageEntry["name"], 
                         {int(x): messageEntry["roles"][x] for x in messageEntry["roles"].keys()}, # convert keys to ints
-                        regex = regex, 
+                        successRegex = successRegex,
+                        failureRegex = failureRegex,
                         deleted = deleted, 
-                        failureRegexMode = False if "failureRegexMode" not in messageEntry else messageEntry["failureRegexMode"],
                         enabled = True if "enabled" not in messageEntry else messageEntry["enabled"]
                         ))
     
@@ -1822,10 +1834,10 @@ class MatrixDB():
                     "protocol":messageEntry._requestResponse.getHttpService().getProtocol() if not deleted else None,
                     "name":messageEntry._name if not deleted else None, 
                     "roles":messageEntry._roles if not deleted else {}, 
-                    "regexBase64":base64.b64encode(messageEntry._regex) if messageEntry._regex and not deleted else "", 
+                    "successRegexBase64":base64.b64encode(messageEntry._successRegex) if messageEntry._successRegex and not deleted else "",
+                    "failureRegexBase64":base64.b64encode(messageEntry._failureRegex) if messageEntry._failureRegex and not deleted else "",
                     "deleted":deleted,
                     "enabled":messageEntry._enabled,
-                    "failureRegexMode":messageEntry._failureRegexMode if not deleted else None,
                     "runBase64ForUserID":{int(x): {
                         "request": None if not messageEntry._userRuns[x] or not messageEntry._userRuns[x].getRequest() else base64.b64encode(StringUtil.fromBytes(messageEntry._userRuns[x].getRequest())),
                         "response": None if not messageEntry._userRuns[x] or not messageEntry._userRuns[x].getResponse() else base64.b64encode(StringUtil.fromBytes(messageEntry._userRuns[x].getResponse()))}
@@ -2221,7 +2233,9 @@ class MessageTableModel(AbstractTableModel):
         elif columnIndex == 1:
             return "Request Name"
         elif columnIndex == 2:
-            return "Response Regex"
+            return "Response Success Regex"
+        elif columnIndex == 3:
+            return "Response Failure Regex"
         else:
             roleEntry = self._db.getRoleByColumn(columnIndex, 'm')
             if roleEntry:
@@ -2238,7 +2252,9 @@ class MessageTableModel(AbstractTableModel):
             elif columnIndex == 1:
                 return messageEntry._name
             elif columnIndex == 2:
-                return messageEntry._regex
+                return messageEntry._successRegex
+            elif columnIndex == 3:
+                return messageEntry._failureRegex
             else:
                 roleEntry = self._db.getRoleByColumn(columnIndex, 'm')
                 if roleEntry:
@@ -2255,10 +2271,16 @@ class MessageTableModel(AbstractTableModel):
             return
         messageEntry = self._db.getMessageByRow(row)
         if messageEntry:
-            if col == self._db.STATIC_MESSAGE_TABLE_COLUMN_COUNT-2:
+            if col == self._db.STATIC_MESSAGE_TABLE_COLUMN_COUNT-3:
                 messageEntry._name = val
+            elif col == self._db.STATIC_MESSAGE_TABLE_COLUMN_COUNT-2:
+                messageEntry._successRegex = val
+                # Add this value to the array
+                if val and val not in self._db.arrayOfRegexes:
+                    self._db.arrayOfRegexes.append(val)
+                # TODO (0.9): Remove unused Regexes from that list
             elif col == self._db.STATIC_MESSAGE_TABLE_COLUMN_COUNT-1:
-                messageEntry._regex = val
+                messageEntry._failureRegex = val
                 # Add this value to the array
                 if val and val not in self._db.arrayOfRegexes:
                     self._db.arrayOfRegexes.append(val)
@@ -2269,7 +2291,7 @@ class MessageTableModel(AbstractTableModel):
     
             self.fireTableCellUpdated(row,col)
             # Update the checkbox result colors since there was a change
-            if col >= self._db.STATIC_MESSAGE_TABLE_COLUMN_COUNT-1:
+            if col >= self._db.STATIC_MESSAGE_TABLE_COLUMN_COUNT-2:
                 messageEntry.clearResults()
                 for i in range(self._db.STATIC_MESSAGE_TABLE_COLUMN_COUNT, self.getColumnCount()):
                     self.fireTableCellUpdated(row,i)
@@ -2284,7 +2306,7 @@ class MessageTableModel(AbstractTableModel):
     # Set checkboxes editable
     def isCellEditable(self, row, col):
         # Include regex
-        if col >= self._db.STATIC_MESSAGE_TABLE_COLUMN_COUNT-2:
+        if col >= self._db.STATIC_MESSAGE_TABLE_COLUMN_COUNT-3:
             return True
         return False
 
@@ -2363,19 +2385,24 @@ class MessageTable(JTable):
 
         db = self.getModel()._db
 
-        # Regex comboboxes
+        # Success Regex comboboxes
         regexComboBox = JComboBox(db.arrayOfRegexes)
         regexComboBox.setEditable(True)
         regexComboBoxEditor = DefaultCellEditor(regexComboBox)
         self.getColumnModel().getColumn(2).setCellEditor(regexComboBoxEditor)
 
-
+        # Failure Regex comboboxes
+        regexComboBox = JComboBox(db.arrayOfRegexes)
+        regexComboBox.setEditable(True)
+        regexComboBoxEditor = DefaultCellEditor(regexComboBox)
+        self.getColumnModel().getColumn(3).setCellEditor(regexComboBoxEditor)
 
         # Resize
         self.getColumnModel().getColumn(0).setMinWidth(30);
         self.getColumnModel().getColumn(0).setMaxWidth(45);
         self.getColumnModel().getColumn(1).setMinWidth(300);
         self.getColumnModel().getColumn(2).setMinWidth(150);
+        self.getColumnModel().getColumn(3).setMinWidth(150);
 
     def updateMessages(self):
         # For now it sounds like this does not need to be locked, since its only manual operations
@@ -2677,9 +2704,6 @@ class SuccessBooleanRenderer(JCheckBox,TableCellRenderer):
                             sawExpectedResults = messageEntry._roleResults[roleIndex]
                             checkboxChecked = messageEntry._roles[roleIndex]
     
-                            # NOTE: currently no way to detect false positive in failure mode
-                            # failureRegexMode = messageEntry.isFailureRegex()
-    
                             if sawExpectedResults:
                                 # Set Green if success
                                 if isSelected:
@@ -2720,24 +2744,10 @@ class RegexRenderer(JLabel, TableCellRenderer):
         cell = self._defaultCellRender.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
         messageEntry = self._db.getMessageByRow(row)
 
-        if column == self._db.STATIC_MESSAGE_TABLE_COLUMN_COUNT-1:
-            if messageEntry:
-                if messageEntry.isFailureRegex():
-                    # Set Grey if failure mode
-                    if isSelected:
-                        cell.setBackground(Color(0xD1,0xB5,0xA3))
-                    else:
-                        cell.setBackground(Color(0x99,0x99,0xCC))
-                else:
-                    if isSelected:
-                        cell.setBackground(table.getSelectionBackground())
-                    else:
-                        cell.setBackground(table.getBackground())
+        if isSelected:
+            cell.setBackground(table.getSelectionBackground())
         else:
-            if isSelected:
-                cell.setBackground(table.getSelectionBackground())
-            else:
-                cell.setBackground(table.getBackground())
+            cell.setBackground(table.getBackground())
         # Set grey if disabled
         if messageEntry and not messageEntry.isEnabled():
             if isSelected:
@@ -2797,14 +2807,14 @@ class ChainEnabledRenderer(TableCellRenderer):
 
 class MessageEntry:
 
-    def __init__(self, index, tableRow, requestResponse, name = "", roles = {}, regex = "", deleted = False, failureRegexMode = False, enabled = True):
+    def __init__(self, index, tableRow, requestResponse, name = "", roles = {}, successRegex = "", failureRegex = "", deleted = False, enabled = True):
         self._index = index
         self._tableRow = tableRow
         self._requestResponse = requestResponse
         self._name = name
         self._roles = roles.copy()
-        self._failureRegexMode = failureRegexMode
-        self._regex = regex
+        self._successRegex = successRegex
+        self._failureRegex = failureRegex
         self._deleted = deleted
         self._userRuns = {}
         self._roleResults = {}
@@ -2836,12 +2846,6 @@ class MessageEntry:
 
     def getTableRow(self):
         return self._tableRow
-
-    def isFailureRegex(self):
-        return self._failureRegexMode
-
-    def setFailureRegex(self, enabled=True):
-        self._failureRegexMode = enabled
 
     def clearResults(self):
         # Clear Previous Results:
